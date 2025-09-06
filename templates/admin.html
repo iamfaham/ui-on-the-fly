@@ -1,0 +1,282 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>UI Generator Admin</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        
+        body {
+            font-family: 'Segoe UI', system-ui, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 2rem;
+        }
+        
+        .container {
+            max-width: 800px;
+            margin: 0 auto;
+            background: rgba(255,255,255,0.95);
+            backdrop-filter: blur(10px);
+            border-radius: 20px;
+            padding: 2rem;
+            box-shadow: 0 20px 40px rgba(0,0,0,0.1);
+        }
+        
+        h1 {
+            text-align: center;
+            margin-bottom: 2rem;
+            color: #4f46e5;
+            font-size: 2.5rem;
+        }
+        
+        .form-group {
+            margin-bottom: 1.5rem;
+        }
+        
+        label {
+            display: block;
+            margin-bottom: 0.5rem;
+            font-weight: 600;
+            color: #374151;
+        }
+        
+        textarea, select, input {
+            width: 100%;
+            padding: 1rem;
+            border: 2px solid #e5e7eb;
+            border-radius: 10px;
+            font-size: 1rem;
+            transition: border-color 0.3s;
+        }
+        
+        textarea {
+            min-height: 120px;
+            resize: vertical;
+        }
+        
+        textarea:focus, select:focus, input:focus {
+            outline: none;
+            border-color: #667eea;
+        }
+        
+        .btn {
+            background: linear-gradient(135deg, #667eea, #764ba2);
+            color: white;
+            border: none;
+            padding: 1rem 2rem;
+            border-radius: 10px;
+            font-size: 1.1rem;
+            font-weight: 600;
+            cursor: pointer;
+            transition: transform 0.3s;
+            width: 100%;
+            margin-top: 1rem;
+        }
+        
+        .btn:hover {
+            transform: translateY(-2px);
+        }
+        
+        .sample-prompts {
+            background: #f8fafc;
+            padding: 1.5rem;
+            border-radius: 10px;
+            margin-bottom: 1.5rem;
+        }
+        
+        .sample-prompts h3 {
+            margin-bottom: 1rem;
+            color: #4f46e5;
+        }
+        
+        .prompt-btn {
+            background: #e0e7ff;
+            border: none;
+            padding: 0.5rem 1rem;
+            margin: 0.25rem;
+            border-radius: 20px;
+            cursor: pointer;
+            font-size: 0.9rem;
+            color: #4338ca;
+        }
+        
+        .prompt-btn:hover {
+            background: #c7d2fe;
+        }
+        
+        .result {
+            margin-top: 2rem;
+            padding: 1rem;
+            background: #f0f9ff;
+            border-radius: 10px;
+            border-left: 4px solid #0ea5e9;
+        }
+        
+        .loading {
+            text-align: center;
+            padding: 2rem;
+            color: #6b7280;
+        }
+        
+        .spinner {
+            border: 3px solid #f3f4f6;
+            border-top: 3px solid #667eea;
+            border-radius: 50%;
+            width: 30px;
+            height: 30px;
+            animation: spin 1s linear infinite;
+            margin: 0 auto 1rem;
+        }
+        
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+        
+        .preview-btn {
+            background: #10b981;
+            color: white;
+            border: none;
+            padding: 0.5rem 1rem;
+            border-radius: 5px;
+            margin-left: 1rem;
+            cursor: pointer;
+        }
+        
+        iframe {
+            width: 100%;
+            height: 500px;
+            border: none;
+            border-radius: 10px;
+            margin-top: 1rem;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🎨 UI Generator Admin</h1>
+        
+        <div class="sample-prompts">
+            <h3>Sample Prompts (Click to use)</h3>
+            {% for prompt in sample_prompts %}
+            <button class="prompt-btn" onclick="document.getElementById('prompt').value = '{{ prompt }}'">
+                {{ prompt[:50] }}...
+            </button>
+            {% endfor %}
+        </div>
+        
+        <form id="generateForm">
+            <div class="form-group">
+                <label for="prompt">UI Description</label>
+                <textarea 
+                    id="prompt" 
+                    name="prompt" 
+                    placeholder="Describe the UI you want to generate... e.g., 'Create a modern dashboard for a cryptocurrency trading app with dark theme'"
+                    required
+                ></textarea>
+            </div>
+            
+            <div class="form-group">
+                <label for="model">Model</label>
+                <select id="model" name="model">
+                    {% for model in models %}
+                    <option value="{{ model }}">{{ model }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+            
+            <div class="form-group">
+                <label for="temperature">Creativity (Temperature)</label>
+                <input type="range" id="temperature" name="temperature" min="0.1" max="1.0" step="0.1" value="0.8">
+                <span id="tempValue">0.8</span>
+            </div>
+            
+            <button type="submit" class="btn">Generate UI</button>
+        </form>
+        
+        <div id="result" style="display: none;"></div>
+    </div>
+    
+    <script>
+        const tempSlider = document.getElementById('temperature');
+        const tempValue = document.getElementById('tempValue');
+        const form = document.getElementById('generateForm');
+        const result = document.getElementById('result');
+        
+        tempSlider.addEventListener('input', function() {
+            tempValue.textContent = this.value;
+        });
+        
+        form.addEventListener('submit', async function(e) {
+            e.preventDefault();
+            
+            const formData = new FormData(form);
+            const data = {
+                prompt: formData.get('prompt'),
+                model: formData.get('model'),
+                temperature: parseFloat(formData.get('temperature'))
+            };
+            
+            result.style.display = 'block';
+            result.innerHTML = `
+                <div class="loading">
+                    <div class="spinner"></div>
+                    <p>Generating your custom UI...</p>
+                </div>
+            `;
+            
+            try {
+                const response = await fetch('/api/generate', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(data)
+                });
+                
+                if (!response.ok) {
+                    throw new Error(`HTTP error! status: ${response.status}`);
+                }
+                
+                const result_data = await response.json();
+                
+                result.innerHTML = `
+                    <div class="result">
+                        <h3>✅ Generated Successfully!</h3>
+                        <p><strong>Prompt:</strong> ${result_data.prompt}</p>
+                        <p><strong>Model:</strong> ${result_data.model}</p>
+                        <p><strong>HTML Size:</strong> ${result_data.html.length} characters</p>
+                        <button class="preview-btn" onclick="showPreview()">Preview</button>
+                        <div id="preview" style="display: none;">
+                            <iframe id="previewFrame"></iframe>
+                        </div>
+                    </div>
+                `;
+                
+                // Store the HTML for preview
+                window.generatedHTML = result_data.html;
+                
+            } catch (error) {
+                result.innerHTML = `
+                    <div class="result" style="background: #fef2f2; border-color: #f87171;">
+                        <h3>❌ Error</h3>
+                        <p>Failed to generate UI: ${error.message}</p>
+                    </div>
+                `;
+            }
+        });
+        
+        function showPreview() {
+            const preview = document.getElementById('preview');
+            const frame = document.getElementById('previewFrame');
+            
+            if (preview.style.display === 'none') {
+                preview.style.display = 'block';
+                frame.srcdoc = window.generatedHTML;
+            } else {
+                preview.style.display = 'none';
+            }
+        }
+    </script>
+</body>
+</html>
