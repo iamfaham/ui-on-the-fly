@@ -1,0 +1,12 @@
+services:
+  - type: web
+    name: ui-on-the-fly
+    env: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: python main.py
+    envVars:
+      - key: CEREBRAS_API_KEY
+        sync: false
+      - key: PORT
+        value: 10000
