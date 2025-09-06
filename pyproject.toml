@@ -10,4 +10,5 @@ dependencies = [
     "pydantic>=1.10.13,<2.0.0",
     "python-dotenv>=1.0.0",
     "cerebras-cloud-sdk>=1.50.1",
+    "sqlalchemy>=2.0.43",
 ]
