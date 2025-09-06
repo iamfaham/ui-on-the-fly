@@ -10,3 +10,18 @@ services:
         sync: false
       - key: PORT
         value: 10000
+      - key: RATE_LIMIT_REQUESTS
+        value: "5"
+      - key: RATE_LIMIT_WINDOW
+        value: "60"
+  - type: redis
+    name: ui-generator-redis
+    plan: free
+    maxmemoryPolicy: allkeys-lru
+  # Alternative: PostgreSQL database for rate limiting
+  # Uncomment the following if you prefer database over Redis:
+  # - type: pserv
+  #   name: ui-generator-db
+  #   plan: free
+  #   databaseName: ui_generator
+  #   user: ui_generator_user

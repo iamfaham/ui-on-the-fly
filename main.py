@@ -9,6 +9,12 @@ from typing import List, Dict
 import logging
 import time
 from collections import defaultdict
+import redis
+import json
+from sqlalchemy import create_engine, Column, String, Float, Integer, Index
+from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy.orm import sessionmaker
+from datetime import datetime, timedelta
 
 # Load environment variables
 load_dotenv()
@@ -40,9 +46,56 @@ class GenerateResponse(BaseModel):
 
 # Configuration
 CEREBRAS_API_KEY = os.getenv("CEREBRAS_API_KEY")
+REDIS_URL = os.getenv("REDIS_URL")
+DATABASE_URL = os.getenv("DATABASE_URL")
 
 if not CEREBRAS_API_KEY:
     logger.warning("CEREBRAS_API_KEY not found in environment variables")
+
+# Database setup for rate limiting
+Base = declarative_base()
+db_engine = None
+SessionLocal = None
+
+
+class RateLimitRecord(Base):
+    __tablename__ = "rate_limits"
+
+    id = Column(Integer, primary_key=True, index=True)
+    client_ip = Column(String, index=True)
+    timestamp = Column(Float, index=True)
+
+    __table_args__ = (Index("idx_client_timestamp", "client_ip", "timestamp"),)
+
+
+# Initialize database connection
+if DATABASE_URL:
+    try:
+        db_engine = create_engine(DATABASE_URL)
+        SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=db_engine)
+        # Create tables
+        Base.metadata.create_all(bind=db_engine)
+        logger.info("Connected to database successfully")
+    except Exception as e:
+        logger.warning(f"Failed to connect to database: {e}")
+        db_engine = None
+        SessionLocal = None
+
+# Initialize Redis connection
+redis_client = None
+if REDIS_URL:
+    try:
+        redis_client = redis.from_url(REDIS_URL, decode_responses=True)
+        # Test connection
+        redis_client.ping()
+        logger.info("Connected to Redis successfully")
+    except Exception as e:
+        logger.warning(
+            f"Failed to connect to Redis: {e}. Falling back to database or in-memory rate limiting."
+        )
+        redis_client = None
+else:
+    logger.warning("REDIS_URL not found. Using database or in-memory rate limiting")
 
 # UI generation prompts
 UI_PROMPTS = [
@@ -69,16 +122,97 @@ AVAILABLE_MODELS = ["qwen-3-coder-480b", "gpt-oss-120b"]
 # In-memory storage for UI history
 ui_history: List[Dict] = []
 
-# Rate limiting storage
+# Rate limiting configuration
+RATE_LIMIT_REQUESTS = int(os.getenv("RATE_LIMIT_REQUESTS", "5"))
+RATE_LIMIT_WINDOW = int(os.getenv("RATE_LIMIT_WINDOW", "60"))  # 60 seconds
+
+# Fallback in-memory storage (used when Redis is not available)
 rate_limit_storage = defaultdict(list)
-RATE_LIMIT_REQUESTS = 5
-RATE_LIMIT_WINDOW = 60  # 60 seconds
 
 
 def check_rate_limit(client_ip: str) -> bool:
-    """Check if client has exceeded rate limit"""
+    """Check if client has exceeded rate limit using Redis, database, or in-memory fallback"""
     current_time = time.time()
 
+    if redis_client:
+        return check_rate_limit_redis(client_ip, current_time)
+    elif SessionLocal:
+        return check_rate_limit_database(client_ip, current_time)
+    else:
+        return check_rate_limit_memory(client_ip, current_time)
+
+
+def check_rate_limit_redis(client_ip: str, current_time: float) -> bool:
+    """Redis-based rate limiting"""
+    try:
+        key = f"rate_limit:{client_ip}"
+
+        # Use Redis pipeline for atomic operations
+        pipe = redis_client.pipeline()
+
+        # Remove expired entries
+        pipe.zremrangebyscore(key, 0, current_time - RATE_LIMIT_WINDOW)
+
+        # Count current requests
+        pipe.zcard(key)
+
+        # Add current request
+        pipe.zadd(key, {str(current_time): current_time})
+
+        # Set expiration for the key
+        pipe.expire(key, RATE_LIMIT_WINDOW)
+
+        # Execute pipeline
+        results = pipe.execute()
+        current_count = results[1]  # Result of zcard
+
+        return current_count < RATE_LIMIT_REQUESTS
+
+    except Exception as e:
+        logger.error(f"Redis rate limiting error: {e}. Falling back to in-memory.")
+        return check_rate_limit_memory(client_ip, current_time)
+
+
+def check_rate_limit_database(client_ip: str, current_time: float) -> bool:
+    """Database-based rate limiting"""
+    try:
+        db = SessionLocal()
+        try:
+            # Clean old records outside the window
+            cutoff_time = current_time - RATE_LIMIT_WINDOW
+            db.query(RateLimitRecord).filter(
+                RateLimitRecord.client_ip == client_ip,
+                RateLimitRecord.timestamp < cutoff_time,
+            ).delete()
+
+            # Count current requests
+            current_count = (
+                db.query(RateLimitRecord)
+                .filter(RateLimitRecord.client_ip == client_ip)
+                .count()
+            )
+
+            # Check if under limit
+            if current_count >= RATE_LIMIT_REQUESTS:
+                return False
+
+            # Add current request
+            new_record = RateLimitRecord(client_ip=client_ip, timestamp=current_time)
+            db.add(new_record)
+            db.commit()
+
+            return True
+
+        finally:
+            db.close()
+
+    except Exception as e:
+        logger.error(f"Database rate limiting error: {e}. Falling back to in-memory.")
+        return check_rate_limit_memory(client_ip, current_time)
+
+
+def check_rate_limit_memory(client_ip: str, current_time: float) -> bool:
+    """In-memory rate limiting (fallback)"""
     # Clean old requests outside the window
     rate_limit_storage[client_ip] = [
         req_time
@@ -272,7 +406,7 @@ async def generate_random_ui(request: Request):
     if not check_rate_limit(client_ip):
         raise HTTPException(
             status_code=429,
-            detail="Rate limit exceeded. Maximum 5 requests per minute.",
+            detail=f"Rate limit exceeded. Maximum {RATE_LIMIT_REQUESTS} requests per {RATE_LIMIT_WINDOW} seconds.",
         )
 
     try:
@@ -313,7 +447,7 @@ async def generate_custom_ui(request: GenerateRequest, http_request: Request):
     if not check_rate_limit(client_ip):
         raise HTTPException(
             status_code=429,
-            detail="Rate limit exceeded. Maximum 5 requests per minute.",
+            detail=f"Rate limit exceeded. Maximum {RATE_LIMIT_REQUESTS} requests per {RATE_LIMIT_WINDOW} seconds.",
         )
 
     try:
@@ -626,7 +760,7 @@ async def get_ui_history(request: Request):
     if not check_rate_limit(client_ip):
         raise HTTPException(
             status_code=429,
-            detail="Rate limit exceeded. Maximum 5 requests per minute.",
+            detail=f"Rate limit exceeded. Maximum {RATE_LIMIT_REQUESTS} requests per {RATE_LIMIT_WINDOW} seconds.",
         )
 
     return {"history": ui_history[-10:], "total": len(ui_history)}
@@ -640,7 +774,7 @@ async def get_available_models(request: Request):
     if not check_rate_limit(client_ip):
         raise HTTPException(
             status_code=429,
-            detail="Rate limit exceeded. Maximum 5 requests per minute.",
+            detail=f"Rate limit exceeded. Maximum {RATE_LIMIT_REQUESTS} requests per {RATE_LIMIT_WINDOW} seconds.",
         )
 
     return {"models": AVAILABLE_MODELS}
@@ -649,10 +783,43 @@ async def get_available_models(request: Request):
 @app.get("/health")
 async def health_check():
     """Health check endpoint"""
+    redis_status = "not_available"
+    if redis_client:
+        try:
+            redis_client.ping()
+            redis_status = "connected"
+        except:
+            redis_status = "disconnected"
+
+    db_status = "not_available"
+    if SessionLocal:
+        try:
+            db = SessionLocal()
+            db.execute("SELECT 1")
+            db.close()
+            db_status = "connected"
+        except:
+            db_status = "disconnected"
+
+    # Determine which storage is being used
+    if redis_client and redis_status == "connected":
+        storage_type = "redis"
+    elif SessionLocal and db_status == "connected":
+        storage_type = "database"
+    else:
+        storage_type = "memory"
+
     return {
         "status": "healthy",
         "api_key_configured": bool(CEREBRAS_API_KEY),
         "total_generated": len(ui_history),
+        "rate_limiting": {
+            "redis_status": redis_status,
+            "database_status": db_status,
+            "requests_per_window": RATE_LIMIT_REQUESTS,
+            "window_seconds": RATE_LIMIT_WINDOW,
+            "storage_type": storage_type,
+        },
     }
 
 
@@ -664,7 +831,7 @@ async def get_random_prompt(request: Request):
     if not check_rate_limit(client_ip):
         raise HTTPException(
             status_code=429,
-            detail="Rate limit exceeded. Maximum 5 requests per minute.",
+            detail=f"Rate limit exceeded. Maximum {RATE_LIMIT_REQUESTS} requests per {RATE_LIMIT_WINDOW} seconds.",
         )
 
     return {"prompt": random.choice(UI_PROMPTS)}
